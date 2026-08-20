@@ -187,7 +187,7 @@ def password_ok(pwd):
 def admin_login():
     st.subheader("🔐 Organizer Mode")
     st.caption("Only the organizer can change competition data.")
-    pwd = st.text_input("Organizer password", type="password")
+    pwd = st.text_input("Organizer password", type="jakewins")
     if st.button("Unlock organizer controls", type="primary", use_container_width=True):
         if password_ok(pwd):
             st.session_state["admin"] = True
