@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timezone
@@ -30,12 +29,42 @@ PLAYERS_FILE = LOCAL / "players.csv"
 EVENTS_FILE = LOCAL / "events.csv"
 RESULTS_FILE = LOCAL / "results.csv"
 
-DEFAULT_PLAYERS = ["J", "C", "R", "P", "E", "N"]
+# Updated Roster
+DEFAULT_PLAYERS = ["Jake", "Ryan", "Patty", "Cam", "Nick", "Eli"]
 DEFAULT_EVENTS = [
     {"name": "Archery", "icon": "🏹", "description": "Bullseyes and pressure."},
     {"name": "Golf", "icon": "⛳", "description": "18 holes. One leaderboard."},
     {"name": "Chess", "icon": "♟️", "description": "Checkmate your competition."},
 ]
+
+BASE_POINTS = {1: 6, 2: 5, 3: 4, 4: 3, 5: 2, 6: 1}
+
+# -----------------------------
+# Scoring Helper Logic
+# -----------------------------
+def calculate_points_from_places(places):
+    """
+    Calculates points for a list of 6 player finish positions,
+    automatically splitting points in the event of ties.
+    Example: places = [1, 1, 3, 4, 5, 6] -> [5.5, 5.5, 4.0, 3.0, 2.0, 1.0]
+    """
+    sorted_places = sorted(places)
+    
+    # Map each finish rank to its base point value
+    rank_points = [BASE_POINTS[r] for r in range(1, len(places) + 1)]
+    
+    # Group ranks and calculate split averages for ties
+    place_to_points = {}
+    i = 0
+    while i < len(sorted_places):
+        val = sorted_places[i]
+        count = sorted_places.count(val)
+        sum_pts = sum(rank_points[i : i + count])
+        avg_pts = sum_pts / count
+        place_to_points[val] = avg_pts
+        i += count
+
+    return [place_to_points[p] for p in places]
 
 # -----------------------------
 # Styling
@@ -91,16 +120,16 @@ st.markdown("""
 # -----------------------------
 def ensure_local():
     if not PLAYERS_FILE.exists():
-        pd.DataFrame({"id": range(1,7), "name": DEFAULT_PLAYERS}).to_csv(PLAYERS_FILE, index=False)
+        pd.DataFrame({"id": range(1, 7), "name": DEFAULT_PLAYERS}).to_csv(PLAYERS_FILE, index=False)
     if not EVENTS_FILE.exists():
         pd.DataFrame({
-            "id": range(1,4),
+            "id": range(1, 4),
             "name": [x["name"] for x in DEFAULT_EVENTS],
             "icon": [x["icon"] for x in DEFAULT_EVENTS],
             "description": [x["description"] for x in DEFAULT_EVENTS]
         }).to_csv(EVENTS_FILE, index=False)
     if not RESULTS_FILE.exists():
-        pd.DataFrame(columns=["id","event_id","player_id","score","points","created_at"]).to_csv(RESULTS_FILE, index=False)
+        pd.DataFrame(columns=["id", "event_id", "player_id", "score", "points", "created_at"]).to_csv(RESULTS_FILE, index=False)
 
 def local_players():
     ensure_local()
@@ -119,7 +148,7 @@ def local_results():
 # -----------------------------
 def get_players():
     if USE_SUPABASE:
-        data = sb.table("players").select("*").eq("active", True).order("id").execute().data
+        data = sb.table("players").select("*").order("id").execute().data
         return pd.DataFrame(data)
     return local_players()
 
@@ -137,45 +166,47 @@ def get_results():
 
 def add_event(name, icon, description):
     if USE_SUPABASE:
-        sb.table("events").insert({"name":name, "icon":icon, "description":description}).execute()
+        sb.table("events").insert({"name": name, "icon": icon, "description": description}).execute()
     else:
         df = local_events()
         new_id = int(df["id"].max()) + 1 if len(df) else 1
         df.loc[len(df)] = [new_id, name, icon, description]
         df.to_csv(EVENTS_FILE, index=False)
 
-def add_result(event_id, player_id, score, points):
+def publish_event_results(event_id, player_places):
+    """
+    Publishes all six player places and calculated points simultaneously.
+    """
     created = datetime.now(timezone.utc).isoformat()
+    calculated_points = calculate_points_from_places([p["place"] for p in player_places])
+
     if USE_SUPABASE:
-        sb.table("results").insert({
-            "event_id": int(event_id),
-            "player_id": int(player_id),
-            "score": float(score),
-            "points": float(points),
-            "created_at": created
-        }).execute()
+        records = [
+            {
+                "event_id": int(event_id),
+                "player_id": int(p["player_id"]),
+                "score": float(p["place"]), # Place stored in score column
+                "points": float(pts),
+                "created_at": created
+            }
+            for p, pts in zip(player_places, calculated_points)
+        ]
+        sb.table("results").insert(records).execute()
     else:
         df = local_results()
-        new_id = int(df["id"].max()) + 1 if len(df) else 1
-        df.loc[len(df)] = [new_id, int(event_id), int(player_id), float(score), float(points), created]
+        current_id = int(df["id"].max()) if len(df) else 0
+        for p, pts in zip(player_places, calculated_points):
+            current_id += 1
+            df.loc[len(df)] = [current_id, int(event_id), int(p["player_id"]), float(p["place"]), float(pts), created]
         df.to_csv(RESULTS_FILE, index=False)
 
-def delete_result(result_id):
+def delete_event_results(event_id):
     if USE_SUPABASE:
-        sb.table("results").delete().eq("id", int(result_id)).execute()
+        sb.table("results").delete().eq("event_id", int(event_id)).execute()
     else:
         df = local_results()
-        df = df[df.id != result_id]
+        df = df[df.event_id != int(event_id)]
         df.to_csv(RESULTS_FILE, index=False)
-
-def rename_players(names):
-    if USE_SUPABASE:
-        for p, name in zip(get_players().to_dict("records"), names):
-            sb.table("players").update({"name": name}).eq("id", int(p["id"])).execute()
-    else:
-        df = local_players()
-        df["name"] = names
-        df.to_csv(PLAYERS_FILE, index=False)
 
 def password_ok(pwd):
     try:
@@ -203,11 +234,11 @@ events = get_events()
 results = get_results()
 
 if not results.empty:
-    merged = results.merge(players[["id","name"]], left_on="player_id", right_on="id", suffixes=("","_player"))
-    merged = merged.merge(events[["id","name","icon"]], left_on="event_id", right_on="id", suffixes=("","_event"))
-    merged = merged.rename(columns={"name":"player","name_event":"event","icon":"event_icon"})
+    merged = results.merge(players[["id", "name"]], left_on="player_id", right_on="id", suffixes=("", "_player"))
+    merged = merged.merge(events[["id", "name", "icon"]], left_on="event_id", right_on="id", suffixes=("", "_event"))
+    merged = merged.rename(columns={"name": "player", "name_event": "event", "icon": "event_icon"})
 else:
-    merged = pd.DataFrame(columns=["id","event_id","player_id","score","points","created_at","player","event","event_icon"])
+    merged = pd.DataFrame(columns=["id", "event_id", "player_id", "score", "points", "created_at", "player", "event", "event_icon"])
 
 # -----------------------------
 # Header
@@ -230,20 +261,20 @@ tabs = st.tabs(["🏆 Standings", "🎯 Events", "📜 History", "🔐 Organizer
 # Standings
 # -----------------------------
 with tabs[0]:
-    totals = players[["id","name"]].copy()
+    totals = players[["id", "name"]].copy()
     if not merged.empty:
         pts = merged.groupby("player_id")["points"].sum().rename("points")
         totals = totals.merge(pts, left_on="id", right_index=True, how="left")
     else:
         totals["points"] = 0
     totals["points"] = totals["points"].fillna(0)
-    totals = totals.sort_values(["points","name"], ascending=[False,True]).reset_index(drop=True)
+    totals = totals.sort_values(["points", "name"], ascending=[False, True]).reset_index(drop=True)
 
     st.subheader("🔥 The Race for Gold")
     if len(totals) >= 3:
         podium = st.columns(3)
-        order = [1,0,2] if len(totals) >= 3 else list(range(len(totals)))
-        medals = ["🥈","🥇","🥉"]
+        order = [1, 0, 2] if len(totals) >= 3 else list(range(len(totals)))
+        medals = ["🥈", "🥇", "🥉"]
         for col, idx, medal in zip(podium, order, medals):
             r = totals.iloc[idx]
             with col:
@@ -264,7 +295,7 @@ with tabs[0]:
     max_points = max(float(totals["points"].max()), 1)
     for i, r in totals.iterrows():
         place = i + 1
-        medal = ["🥇","🥈","🥉"][i] if i < 3 else f"#{place}"
+        medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"#{place}"
         pct = min(float(r["points"]) / max_points, 1.0)
         st.markdown(
             f'<div class="card"><span class="rank">{medal} {r["name"]}</span>'
@@ -314,9 +345,10 @@ with tabs[2]:
         st.info("No scores have been entered yet.")
     else:
         history = merged.sort_values("created_at", ascending=False)[
-            ["event_icon","event","player","score","points","created_at"]
+            ["event_icon", "event", "player", "score", "points", "created_at"]
         ].copy()
-        history.columns = ["","Event","Player","Result","Points","Time"]
+        history["score"] = history["score"].astype(int).astype(str) + " Place"
+        history.columns = ["", "Event", "Player", "Finish", "Points", "Time"]
         st.dataframe(history, use_container_width=True, hide_index=True)
 
 # -----------------------------
@@ -326,7 +358,7 @@ with tabs[3]:
     if not st.session_state.get("admin", False):
         admin_login()
     else:
-        c1, c2 = st.columns([4,1])
+        c1, c2 = st.columns([4, 1])
         with c1:
             st.success("Organizer controls unlocked.")
         with c2:
@@ -335,7 +367,7 @@ with tabs[3]:
                 st.rerun()
 
         st.subheader("➕ Add an Event")
-        c1,c2 = st.columns([1,3])
+        c1, c2 = st.columns([1, 3])
         with c1:
             icon = st.text_input("Icon", "🎯")
         with c2:
@@ -348,40 +380,68 @@ with tabs[3]:
                 st.rerun()
 
         st.divider()
-        st.subheader("📝 Enter Results")
+        st.subheader("📝 Enter Event Results")
         event_options = {f"{e['icon']} {e['name']}": e["id"] for _, e in events.iterrows()}
-        player_options = {p["name"]: p["id"] for _, p in players.iterrows()}
-        if event_options and player_options:
-            selected_event = st.selectbox("Event", list(event_options))
-            selected_player = st.selectbox("Player", list(player_options))
-            score = st.number_input("Raw result / score", value=0.0, step=1.0)
-            points = st.number_input("Olympics points", min_value=0.0, value=1.0, step=0.5)
-            if st.button("💾 Publish Result", type="primary", use_container_width=True):
-                add_result(event_options[selected_event], player_options[selected_player], score, points)
-                st.success("Result published to the live leaderboard!")
-                st.rerun()
+
+        if event_options:
+            selected_event_label = st.selectbox("Select Event", list(event_options))
+            selected_event_id = event_options[selected_event_label]
+
+            # Prevent double publishing check
+            already_published = not results.empty and (results["event_id"] == selected_event_id).any()
+
+            if already_published:
+                st.warning("⚠️ Results have already been published for this event. To re-enter or change results, delete the event results below.")
+            else:
+                st.write("Assign finishing place for each player (1st to 6th):")
+                player_entries = []
+
+                # Render selectboxes for each player
+                for _, p in players.iterrows():
+                    col1, col2 = st.columns([2, 2])
+                    with col1:
+                        st.markdown(f"**{p['name']}**")
+                    with col2:
+                        place = st.number_input(
+                            f"Place for {p['name']}",
+                            min_value=1,
+                            max_value=len(players),
+                            value=1,
+                            key=f"place_{p['id']}",
+                            label_visibility="collapsed"
+                        )
+                    player_entries.append({"player_id": p["id"], "name": p["name"], "place": place})
+
+                # Calculate live preview points
+                places_list = [p["place"] for p in player_entries]
+                computed_pts = calculate_points_from_places(places_list)
+
+                # Live Points Preview Block
+                st.markdown("#### 👁️ Live Points Preview")
+                preview_df = pd.DataFrame({
+                    "Player": [p["name"] for p in player_entries],
+                    "Place": [f"#{p['place']}" for p in player_entries],
+                    "Points Awarded": computed_pts
+                })
+                st.dataframe(preview_df, use_container_width=True, hide_index=True)
+
+                if st.button("💾 Publish Event Results", type="primary", use_container_width=True):
+                    publish_event_results(selected_event_id, player_entries)
+                    st.success("All 6 results published successfully to the leaderboard!")
+                    st.rerun()
 
         st.divider()
-        st.subheader("👥 Player Names")
-        names = [st.text_input(f"Player {i+1}", p["name"], key=f"name_{p['id']}") for i, p in players.iterrows()]
-        if st.button("Save Player Names", use_container_width=True):
-            rename_players([x.strip() for x in names])
-            st.success("Player names updated.")
-            st.rerun()
-
-        st.divider()
-        st.subheader("🗑️ Correct a Result")
+        st.subheader("🗑️ Correct / Delete Event Results")
         if not merged.empty:
-            choices = {
-                f"{r['event']} — {r['player']} — {r['points']:g} pts": r["id"]
-                for _, r in merged.sort_values("created_at", ascending=False).iterrows()
-            }
-            selected = st.selectbox("Result to delete", list(choices))
-            if st.button("Delete Selected Result"):
-                delete_result(choices[selected])
-                st.success("Result deleted.")
+            published_events = merged[["event_id", "event_icon", "event"]].drop_duplicates()
+            event_delete_options = {f"{r['event_icon']} {r['event']}": r["event_id"] for _, r in published_events.iterrows()}
+            
+            selected_del_event = st.selectbox("Select event to clear results", list(event_delete_options))
+            if st.button("Delete Event Results", type="secondary", use_container_width=True):
+                delete_event_results(event_delete_options[selected_del_event])
+                st.success("Results cleared for event!")
                 st.rerun()
         else:
-            st.caption("Nothing to delete yet.")
+            st.caption("No results published to clear.")
 
 st.sidebar.caption("🏆 Boys Trip Olympics")
