@@ -181,13 +181,13 @@ def password_ok(pwd):
     try:
         expected = st.secrets["ADMIN_PASSWORD"]
     except Exception:
-        expected = os.environ.get("OLYMPICS_ADMIN_PASSWORD", "change-me")
+        expected = os.environ.get("OLYMPICS_ADMIN_PASSWORD", "jakewins")
     return hashlib.sha256(pwd.encode()).hexdigest() == hashlib.sha256(expected.encode()).hexdigest()
 
 def admin_login():
     st.subheader("🔐 Organizer Mode")
     st.caption("Only the organizer can change competition data.")
-    pwd = st.text_input("Organizer password", type="jakewins")
+    pwd = st.text_input("Organizer password", type="password")
     if st.button("Unlock organizer controls", type="primary", use_container_width=True):
         if password_ok(pwd):
             st.session_state["admin"] = True
