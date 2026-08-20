@@ -29,8 +29,8 @@ PLAYERS_FILE = LOCAL / "players.csv"
 EVENTS_FILE = LOCAL / "events.csv"
 RESULTS_FILE = LOCAL / "results.csv"
 
-# Updated Roster
-DEFAULT_PLAYERS = ["Jake", "Ryan", "Patty", "Cam", "Nick", "Eli"]
+# Fixed Roster
+DEFAULT_PLAYERS = ["Jake", "Cam", "Ryan", "Patty", "Eli", "Nick"]
 DEFAULT_EVENTS = [
     {"name": "Archery", "icon": "🏹", "description": "Bullseyes and pressure."},
     {"name": "Golf", "icon": "⛳", "description": "18 holes. One leaderboard."},
@@ -121,6 +121,12 @@ st.markdown("""
 def ensure_local():
     if not PLAYERS_FILE.exists():
         pd.DataFrame({"id": range(1, 7), "name": DEFAULT_PLAYERS}).to_csv(PLAYERS_FILE, index=False)
+    else:
+        # Guarantee local file updates single-letter initials to full names
+        df = pd.read_csv(PLAYERS_FILE)
+        if df.empty or df["name"].str.len().max() == 1:
+            pd.DataFrame({"id": range(1, 7), "name": DEFAULT_PLAYERS}).to_csv(PLAYERS_FILE, index=False)
+
     if not EVENTS_FILE.exists():
         pd.DataFrame({
             "id": range(1, 4),
@@ -128,6 +134,7 @@ def ensure_local():
             "icon": [x["icon"] for x in DEFAULT_EVENTS],
             "description": [x["description"] for x in DEFAULT_EVENTS]
         }).to_csv(EVENTS_FILE, index=False)
+        
     if not RESULTS_FILE.exists():
         pd.DataFrame(columns=["id", "event_id", "player_id", "score", "points", "created_at"]).to_csv(RESULTS_FILE, index=False)
 
@@ -147,29 +154,70 @@ def local_results():
 # Database adapter
 # -----------------------------
 def get_players():
+    df = pd.DataFrame()
     if USE_SUPABASE:
-        data = sb.table("players").select("*").order("id").execute().data
-        return pd.DataFrame(data)
-    return local_players()
+        try:
+            data = sb.table("players").select("*").order("id").execute().data
+            if data:
+                df = pd.DataFrame(data)
+        except Exception as e:
+            st.error(f"Supabase error fetching players: {e}")
+
+    # Fallback to local file if database query fails or is empty
+    if df.empty:
+        df = local_players()
+
+    # Guarantee required columns are present to prevent Pandas KeyErrors
+    for col in ["id", "name"]:
+        if col not in df.columns:
+            df[col] = pd.Series(dtype="object")
+
+    return df
 
 def get_events():
+    df = pd.DataFrame()
     if USE_SUPABASE:
-        data = sb.table("events").select("*").order("id").execute().data
-        return pd.DataFrame(data)
-    return local_events()
+        try:
+            data = sb.table("events").select("*").order("id").execute().data
+            if data:
+                df = pd.DataFrame(data)
+        except Exception as e:
+            st.error(f"Supabase error fetching events: {e}")
+
+    if df.empty:
+        df = local_events()
+
+    for col in ["id", "name", "icon", "description"]:
+        if col not in df.columns:
+            df[col] = pd.Series(dtype="object")
+
+    return df
 
 def get_results():
+    df = pd.DataFrame()
     if USE_SUPABASE:
-        data = sb.table("results").select("*").order("created_at").execute().data
-        return pd.DataFrame(data)
-    return local_results()
+        try:
+            data = sb.table("results").select("*").order("created_at").execute().data
+            if data:
+                df = pd.DataFrame(data)
+        except Exception as e:
+            st.error(f"Supabase error fetching results: {e}")
+
+    if df.empty:
+        df = local_results()
+
+    for col in ["id", "event_id", "player_id", "score", "points", "created_at"]:
+        if col not in df.columns:
+            df[col] = pd.Series(dtype="object")
+
+    return df
 
 def add_event(name, icon, description):
     if USE_SUPABASE:
         sb.table("events").insert({"name": name, "icon": icon, "description": description}).execute()
     else:
         df = local_events()
-        new_id = int(df["id"].max()) + 1 if len(df) else 1
+        new_id = int(df["id"].max()) + 1 if len(df) and not df["id"].isna().all() else 1
         df.loc[len(df)] = [new_id, name, icon, description]
         df.to_csv(EVENTS_FILE, index=False)
 
@@ -185,7 +233,7 @@ def publish_event_results(event_id, player_places):
             {
                 "event_id": int(event_id),
                 "player_id": int(p["player_id"]),
-                "score": float(p["place"]), # Place stored in score column
+                "score": float(p["place"]), # Finish place stored in score column
                 "points": float(pts),
                 "created_at": created
             }
@@ -194,7 +242,7 @@ def publish_event_results(event_id, player_places):
         sb.table("results").insert(records).execute()
     else:
         df = local_results()
-        current_id = int(df["id"].max()) if len(df) else 0
+        current_id = int(df["id"].max()) if len(df) and not df["id"].isna().all() else 0
         for p, pts in zip(player_places, calculated_points):
             current_id += 1
             df.loc[len(df)] = [current_id, int(event_id), int(p["player_id"]), float(p["place"]), float(pts), created]
@@ -233,7 +281,7 @@ players = get_players()
 events = get_events()
 results = get_results()
 
-if not results.empty:
+if not results.empty and "player_id" in results.columns and not results["player_id"].isna().all():
     merged = results.merge(players[["id", "name"]], left_on="player_id", right_on="id", suffixes=("", "_player"))
     merged = merged.merge(events[["id", "name", "icon"]], left_on="event_id", right_on="id", suffixes=("", "_event"))
     merged = merged.rename(columns={"name": "player", "name_event": "event", "icon": "event_icon"})
