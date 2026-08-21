@@ -221,6 +221,19 @@ def add_event(name, icon, description):
         df.loc[len(df)] = [new_id, name, icon, description]
         df.to_csv(EVENTS_FILE, index=False)
 
+def delete_event(event_id):
+    if USE_SUPABASE:
+        # results are removed automatically via ON DELETE CASCADE
+        sb.table("events").delete().eq("id", int(event_id)).execute()
+    else:
+        events_df = local_events()
+        events_df = events_df[events_df["id"] != int(event_id)]
+        events_df.to_csv(EVENTS_FILE, index=False)
+
+        results_df = local_results()
+        results_df = results_df[results_df["event_id"] != int(event_id)]
+        results_df.to_csv(RESULTS_FILE, index=False)
+
 def publish_event_results(event_id, player_places):
     """
     Publishes all six player places and calculated points simultaneously.
@@ -426,6 +439,31 @@ with tabs[3]:
                 add_event(name.strip(), icon.strip() or "🎯", description.strip())
                 st.success("Event added!")
                 st.rerun()
+
+        st.divider()
+        st.subheader("🗑️ Remove an Event")
+        remove_event_options = {f"{e['icon']} {e['name']}": e["id"] for _, e in events.iterrows()}
+        if remove_event_options:
+            selected_remove_event = st.selectbox(
+                "Select event to remove",
+                list(remove_event_options),
+                key="remove_event_select",
+            )
+            confirm_remove = st.checkbox(
+                "I understand this permanently removes the event and all of its results.",
+                key="confirm_remove_event",
+            )
+            if st.button(
+                "🗑️ Delete Event",
+                type="secondary",
+                use_container_width=True,
+                disabled=not confirm_remove,
+            ):
+                delete_event(remove_event_options[selected_remove_event])
+                st.success(f"{selected_remove_event} deleted.")
+                st.rerun()
+        else:
+            st.caption("No events available to remove.")
 
         st.divider()
         st.subheader("📝 Enter Event Results")
